@@ -430,6 +430,7 @@ class AgentLoopWorker:
             self.teacher_server_manager = AsyncTeacherLLMServerManager(
                 config=config,
                 teacher_client=teacher_client,
+                student_tokenizer=self.tokenizer,
             )
 
         # Load tools once per worker; each trajectory just reuses self.tools.
@@ -910,6 +911,11 @@ class AgentLoopWorker:
     ) -> None:
         """Compute teacher logprobs for single sample."""
         if self.distillation_enabled and not validate:
+            if self.teacher_server_manager.distillation_config.full_rollout_context:
+                if output.num_turns != 2 or not all(output.response_mask):
+                    raise ValueError(
+                        "Full-rollout context only supports single-turn responses without tool observations."
+                    )
             routing_key = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)
@@ -921,6 +927,8 @@ class AgentLoopWorker:
                 multi_modal_data=output.multi_modal_data,
                 mm_processor_kwargs=output.mm_processor_kwargs,
                 routing_key=routing_key,
+                student_prompt_length=len(prompt_ids),
+                raw_prompt=sample_kwargs.get("raw_prompt") if sample_kwargs is not None else None,
             )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs

@@ -19,6 +19,11 @@ from omegaconf import DictConfig
 from torch.nn import functional as F
 
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.full_rollout_context import (
+    align_teacher_response_outputs,
+    build_full_rollout_teacher_prompt,
+    validate_shared_vocabulary,
+)
 from verl.workers.config import (
     DistillationConfig,
     DistillationLossConfig,
@@ -69,6 +74,7 @@ class AsyncTeacherLLMServerManager:
         self,
         config: DictConfig,
         teacher_client: dict[str, LLMServerClient],
+        student_tokenizer: Any = None,
     ):
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
@@ -82,6 +88,18 @@ class AsyncTeacherLLMServerManager:
                 f"do not match teacher routing keys {sorted(expected)}."
             )
         self.teacher_client: dict[str, LLMServerClient] = teacher_client
+        self.student_tokenizer = student_tokenizer
+        self.teacher_tokenizers: dict[str, Any] = {}
+        if self.distillation_config.full_rollout_context:
+            if student_tokenizer is None:
+                raise ValueError("Full-rollout context requires the student tokenizer.")
+            from verl.utils.fs import copy_to_local
+            from verl.utils.tokenizer import hf_tokenizer
+
+            for key, model_config in self.teacher_model_configs.items():
+                tokenizer = hf_tokenizer(copy_to_local(model_config.model_path), trust_remote_code=False)
+                validate_shared_vocabulary(student_tokenizer, tokenizer)
+                self.teacher_tokenizers[key] = tokenizer
 
     def _resolve_teacher_key(self, routing_key: Optional[str]) -> str:
         if len(self.teacher_model_configs) == 1:
@@ -105,12 +123,40 @@ class AsyncTeacherLLMServerManager:
         multi_modal_data: Optional[dict[str, Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         routing_key: Optional[str] = None,
+        student_prompt_length: Optional[int] = None,
+        raw_prompt: Optional[list[dict[str, Any]]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
         teacher_key = self._resolve_teacher_key(routing_key)
         teacher_model_config = self.teacher_model_configs[teacher_key]
         client = self.teacher_client[teacher_key]
+        original_sequence_length = len(sequence_ids)
+        teacher_prompt_length = None
+        if self.distillation_config.full_rollout_context:
+            if multi_modal_data or mm_processor_kwargs:
+                raise ValueError("Full-rollout context currently supports text-only, single-turn distillation.")
+            if student_prompt_length is None or not 0 < student_prompt_length < original_sequence_length:
+                raise ValueError("Full-rollout context requires a non-empty student prompt and response.")
+            if raw_prompt is None:
+                raise ValueError("Full-rollout context requires the original raw_prompt messages.")
+            response_ids = sequence_ids[student_prompt_length:]
+            teacher_prompt = build_full_rollout_teacher_prompt(
+                raw_prompt=raw_prompt,
+                response_ids=response_ids,
+                student_tokenizer=self.student_tokenizer,
+                teacher_tokenizer=self.teacher_tokenizers[teacher_key],
+                instruction=self.distillation_config.full_rollout_context_instruction,
+                max_prompt_length=self.distillation_config.full_rollout_context_max_prompt_length,
+                chat_template_kwargs=self.distillation_config.full_rollout_context_chat_template_kwargs,
+            )
+            teacher_prompt_length = len(teacher_prompt)
+            sequence_ids = teacher_prompt + response_ids
+            max_model_len = teacher_model_config.inference.max_model_len
+            if max_model_len is not None and len(sequence_ids) + 1 > max_model_len:
+                raise ValueError(
+                    f"Teacher request requires {len(sequence_ids) + 1} tokens, exceeding {max_model_len=}."
+                )
         teacher_output = await client.generate(
             request_id=uuid4().hex,
             prompt_ids=sequence_ids,
@@ -125,4 +171,12 @@ class AsyncTeacherLLMServerManager:
         teacher_ids = torch.tensor(teacher_output.extra_fields["prompt_ids"], dtype=torch.int32)
         teacher_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
         assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(sequence_ids)
+        if teacher_prompt_length is not None:
+            teacher_ids, teacher_logprobs = align_teacher_response_outputs(
+                teacher_ids,
+                teacher_logprobs,
+                teacher_prompt_length=teacher_prompt_length,
+                student_prompt_length=student_prompt_length,
+                response_length=original_sequence_length - student_prompt_length,
+            )
         return teacher_ids, teacher_logprobs

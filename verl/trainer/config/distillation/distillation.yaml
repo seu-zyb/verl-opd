@@ -13,6 +13,26 @@ defaults:
 # Whether to enable distillation.
 enabled: false
 
+# Teacher-only hindsight context. The student input and target rollout stay unchanged.
+full_rollout_context: false
+
+# Teacher instruction (empty string is also supported).
+full_rollout_context_instruction: >-
+  以上是学生对该问题的一次完整作答，可能包含错误。
+  请独立判断其正确性。在给出正确解答的前提下，
+  尽量保留其中合理的推理思路、措辞和组织方式；
+  对于错误或不成立的内容，应予以纠正。
+
+# Includes problem, quoted rollout, instruction and teacher chat template; excludes
+# the second (teacher-forced) copy of the response. Overlong requests fail explicitly.
+full_rollout_context_max_prompt_length: 4096
+
+# Teacher-only template options, independent of the student's input template.
+full_rollout_context_chat_template_kwargs:
+
+  # Avoid opening a new thinking segment when scoring a base-model response.
+  enable_thinking: false
+
 # distillation loss config
 distillation_loss:
 

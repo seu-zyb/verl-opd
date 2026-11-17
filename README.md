@@ -1,3 +1,14 @@
+## 完整 Rollout 上下文蒸馏实验
+
+本实验分支基于官方 **verl v0.8.0**：学生使用 Qwen3-1.7B-Base，冻结教师使用 Qwen3-14B。
+教师额外看到学生的完整回答，再为原学生轨迹提供逐 token 蒸馏信号。
+
+请先阅读 [中文实验需求、实现与运行说明](docs/full_rollout_context_zh.md)。
+启动入口：[run_full_rollout_context.sh](examples/on_policy_distillation_trainer/run_full_rollout_context.sh)。
+新增功能默认关闭；CPU 回归已通过，H100 实际训练仍需验证。
+
+---
+
 <div align="center">
  👋 Hi, everyone!
     verl is a RL training library initiated by <b>ByteDance Seed team</b> and maintained by the verl community.

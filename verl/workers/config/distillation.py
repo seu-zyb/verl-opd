@@ -157,19 +157,22 @@ class DistillationTeacherModelConfig(BaseConfig):
         if self.num_replicas is None:
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
-    def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
+    def validate_and_prepare_for_distillation(
+        self, use_topk: bool, topk: Optional[int], teacher_prompt_length: Optional[int] = None
+    ) -> None:
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length
         student_response_length = self.inference.response_length
-        required_context_len = student_prompt_length + student_response_length + 1
+        prefix_length = student_prompt_length if teacher_prompt_length is None else teacher_prompt_length
+        required_context_len = prefix_length + student_response_length + 1
         if max_model_len is not None and required_context_len > max_model_len:
             raise ValueError(
-                "Distillation teacher inference requires room for the student prompt, the full student "
-                f"response, and one generated token, but got {student_prompt_length=}, "
+                "Distillation teacher inference requires room for the teacher prefix, the full student "
+                f"response, and one generated token, but got {prefix_length=}, "
                 f"{student_response_length=}, {required_context_len=}, {max_model_len=}."
             )
-        self.inference.prompt_length = self.inference.prompt_length + self.inference.response_length
+        self.inference.prompt_length = prefix_length + student_response_length
         self.inference.response_length = 1
         self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
 
@@ -212,6 +215,16 @@ class DistillationConfig(BaseConfig):
 
     enabled (bool):
         Whether on-policy distillation is enabled.
+    full_rollout_context (bool):
+        Give the teacher the complete student attempt before scoring the original response.
+    full_rollout_context_instruction (str):
+        Instruction appended to the teacher's single user message; empty string is supported.
+    full_rollout_context_max_prompt_length (int):
+        Maximum teacher prefix length, including the quoted attempt and chat template.
+        The original response being scored is budgeted separately. Never silently truncate.
+    full_rollout_context_chat_template_kwargs (dict):
+        Teacher-only chat template options. Disable Qwen3 thinking by default to avoid
+        inserting an open thinking segment before the base student's response.
     n_gpus_per_node (int):
         Number of GPUs per node in the teacher resource pool.
     nnodes (int):
@@ -248,6 +261,15 @@ class DistillationConfig(BaseConfig):
     _mutable_fields = BaseConfig._mutable_fields | {"teacher_models", "n_gpus_per_node", "nnodes"}
 
     enabled: bool = False
+    full_rollout_context: bool = False
+    full_rollout_context_instruction: str = (
+        "以上是学生对该问题的一次完整作答，可能包含错误。"
+        "请独立判断其正确性。在给出正确解答的前提下，"
+        "尽量保留其中合理的推理思路、措辞和组织方式；"
+        "对于错误或不成立的内容，应予以纠正。"
+    )
+    full_rollout_context_max_prompt_length: int = 4096
+    full_rollout_context_chat_template_kwargs: dict = field(default_factory=lambda: {"enable_thinking": False})
     n_gpus_per_node: int = 0
     nnodes: int = 0
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
@@ -258,12 +280,17 @@ class DistillationConfig(BaseConfig):
         if not self.enabled:
             return
 
+        if self.full_rollout_context and self.full_rollout_context_max_prompt_length <= 0:
+            raise ValueError("full_rollout_context_max_prompt_length must be positive.")
         self.teacher_models = self._resolve_teacher_models()
         teacher_world_size_sum = 0
         for teacher_model in self.teacher_models.values():
             teacher_model.validate_and_prepare_for_distillation(
                 use_topk=self.distillation_loss.loss_settings.use_topk,
                 topk=self.distillation_loss.topk,
+                teacher_prompt_length=(
+                    self.full_rollout_context_max_prompt_length if self.full_rollout_context else None
+                ),
             )
             teacher_world_size_sum += teacher_model.world_size
         total_pool_size = self.n_gpus_per_node * self.nnodes
