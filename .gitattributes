@@ -1,0 +1,5 @@
+# Keep the Linux cluster entrypoints usable after editing on Windows.
+scripts/opd/** text eol=lf
+server_debug/*.slurm text eol=lf
+server_debug/*.sh text eol=lf
+server_debug/*.py text eol=lf

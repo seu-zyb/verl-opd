@@ -1,5 +1,8 @@
 # 完整学生 Rollout 作为教师上下文：实验需求与实现说明
 
+学校 gpuB 四卡实验的最新提交入口、运行日志位置及环境排查说明见
+[gpuB 启动与修复说明](../scripts/opd/README_zh.md)。
+
 ## 1. 本次实验要验证什么
 
 使用官方 verl 的 on-policy distillation（OPD）流程，研究以下问题：
