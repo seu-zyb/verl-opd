@@ -1,0 +1,96 @@
+逐 token 概率诊断补丁（verl-opd / FSDP engine）
+
+用途
+每一个训练 global_step，在 actor 更新参数之前，对该 batch 的全部有效回答 token 保存：
+1. token ID、token 字符串、原始 prompt/response IDs（保留特殊 token）。
+2. 学生对实际 token 的 logp、p，以及教师对同一 token 的 logp、p。
+3. logp_student_minus_teacher：逐 token 的有符号概率差，不是完整 KL，也不是最终 PPO loss。
+4. 学生完整词表分布的熵。
+5. 学生概率最大的 K 个 token 及其真实概率，和其余词表的总概率 student_other_mass。
+6. 学生对 tokenizer.eos_token_id、<|im_end|>、<|endoftext|> 的概率（去重）。即使不在 Top-K 内也记录。
+
+范围说明
+这是学生分布的 Top-K 摘要，不默认保存完整词表。教师部分只有训练时已计算的实际 token 概率，
+没有增加教师 Top-K 或教师 EOS 概率。不能从 teacher_p 推断教师其他候选 token 的概率。
+概率来自 temperature 缩放后的完整 softmax，位于 top_p/top_k 等采样过滤之前。
+本实验 temperature=1、top_p=1、top_k=-1 时，没有这类过滤产生的差别。
+Top-K 只用于日志，不改变 rollout.top_k、distillation_loss.topk 或蒸馏目标。
+watch 列表是要观察的 token，不等于运行时全部 stop_token_ids。response_at_capacity 只表示到达长度上限，
+并非来自 vLLM 的 finish_reason。这个补丁不采集真实 finish_reason。
+
+改动文件
+修改：verl/trainer/ppo/ray_trainer.py
+  在 _compute_old_log_prob 中申请诊断输出，在转换为 response 对齐形状后落盘。
+修改：verl/workers/engine/fsdp/transformer_impl.py
+  在 FSDPEngineWithLMHead.prepare_model_outputs 中从 logits 提取 Top-K 和 EOS 概率。
+新增：verl/utils/token_probability_debug.py
+  概率归一化、师生 token 对齐检查、压缩 JSONL 保存。
+新增：scripts/opd/inspect_token_probabilities.py
+  无额外依赖的日志查看工具。
+新增：tests/utils/test_token_probability_debug_on_cpu.py
+  CPU 验证用例。
+
+下载分支
+本功能基于实验分支 codex/full-rollout-context 的 f5a2090 提交。
+服务器仓库中执行：
+
+cd /seu_nvme/home/fenglei/213241973/code/verl-opd
+git fetch origin codex/token-probability-logging
+git switch --track origin/codex/token-probability-logging
+
+如果本地已经有同名分支，使用 git switch codex/token-probability-logging。
+如果 Git 提示本地修改冲突，保留修改并先处理冲突；不要使用 reset --hard 或强制切换。
+分支只加入概率诊断功能，不改变实验分支原有的 teacher context 方法。
+
+启用
+在 Slurm 脚本调用 run_full_rollout_context.sh 的尾部、2>&1 | tee 之前加入以下参数。
+每一行末尾的反斜杠都需要保留：
+
+"+trainer.token_probability_dir=${RUN_OUTPUT}/token_probs" \
+"+trainer.token_probability_every=1" \
+"+trainer.token_probability_topk=10" \
+"actor_rollout_ref.model.use_fused_kernels=False" \
+
+every=1 表示每个 global_step 保存，不是每个 epoch。仍使用原来的 baseline/style 模式。
+未设置 token_probability_dir 时功能关闭。不要开启 rollout_correction.bypass_mode，
+否则跳过学生 logprob 重算，补丁会明确报错。仅适用于这里修改的 FSDP engine 路径。
+
+输出
+${RUN_OUTPUT}/token_probs/step_000001.jsonl.gz
+${RUN_OUTPUT}/token_probs/step_000002.jsonl.gz
+...
+每行是一个样本，tokens 数组包含其全部有效回答 token，不包含 padding。
+step_000001 对应第一次参数更新前的模型；step_000100 对应第 100 次参数更新前。
+这不同于更新后保存的 validation/100.jsonl 或 checkpoint global_step_100。
+batch 每步不同，因此不应直接把不同文件的 sample=0 当成同一道题；用 uid/prompt_ids 区分。
+要比较固定题目的模型演化，另做固定 prompt + 固定前缀探针，这个补丁不会自动增加固定探针。
+
+查看
+python scripts/opd/inspect_token_probabilities.py \
+  "$RUN_OUTPUT/token_probs/step_000020.jsonl.gz" --sample 0 --start 0 --count 30
+
+查看最后 40 个 token：
+python scripts/opd/inspect_token_probabilities.py \
+  "$RUN_OUTPUT/token_probs/step_000100.jsonl.gz" --sample 0 --start -40 --count 40
+
+--sample 是该文件内的行号，从 0 开始；--start 是有效回答 token 的索引。
+sample 顺序可能被 batch balancing 调整，应结合 uid 和 prompt_ids。
+保存的 token 字符串是 tokenizer 的词表表示，不保证单个 token 解码后就是完整汉字。
+
+如何判断退化
+1. 从第一处完整答案之后开始检查：重复片段对应 token 是否经常占据 Top-1，概率是否接近 1，熵是否很低。
+2. 同时查看两个结束符的概率；只有概率低不能证明停止规则错了。
+3. 比较重复 token 的 teacher_p 和 student_p：教师更支持某个重复 token 是一个线索，不是因果证明。
+4. logp_student_minus_teacher<0 表示教师给当前 token 的概率更高。实际梯度还受 ratio/clamp 等处理影响。
+5. 如果记录过程中报 alignment mismatch，先排查 teacher_ids、response_ids 和预测位置对齐，不能直接调参掩盖。
+6. 如果结束符实际已生成但仍继续，需要结合真实 stop IDs、finish_reason 进一步排查。
+
+开销和验证
+完整词表若约 15 万、每步 8*1024 个 token，单份 float32 概率约 4.9 GB/步（不含 JSON 开销），
+100 步约 490 GB；保存学生和教师则再翻倍。因此默认用 Top-10 + other_mass + EOS。
+本实现按 64 个位置一块做 FP32 归一化，额外计算和 JSON/gzip I/O 会增加运行时间。
+不改变训练目标，但会影响性能；当前未在服务器完成 GPU/多卡训练验证。
+已通过 CPU 测试：完整词表归一化、Top-K 外 EOS、teacher shift、padding 与 EOS 同 ID、错位拒绝、非有限数。
+
+先用独立输出目录试跑 2 步，检查两份文件、正常 loss、Top-K 概率和 other_mass 之和约为 1，再进行 100 步实验。
+可以在 Slurm 中临时将 TOTAL_TRAINING_STEPS 设为 2，确认后恢复 100。

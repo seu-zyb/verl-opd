@@ -1073,6 +1073,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
             data=micro_batch, key="calculate_sum_pi_squared", default=False
         )
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+        token_diag_topk = tu.get_non_tensor_data(data=micro_batch, key="token_diag_topk", default=0)
+        token_diag_watch_ids = tu.get_non_tensor_data(data=micro_batch, key="token_diag_watch_ids", default=())
+        if token_diag_topk and use_fused_kernels:
+            raise ValueError("Token diagnostics needs non-fused logits during logprob recomputation")
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1241,6 +1245,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         sum_pi_squared = torch.nested.nested_tensor_from_jagged(sum_pi_squared_rmpad, cu_seqlens)
                 else:
                     raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
+
+        if token_diag_topk:
+            from verl.utils.token_probability_debug import summarize_logits
+
+            summaries = summarize_logits(logits_rmpad, token_diag_topk, token_diag_watch_ids)
+            for key, value in summaries.items():
+                if self.use_ulysses_sp:
+                    value = gather_outputs_and_unpad(
+                        value, gather_dim=0, unpad_dim=0, padding_size=output_args["pad_size"]
+                    )
+                model_output[key] = torch.nested.nested_tensor_from_jagged(value, input_ids.offsets())
 
         model_output["log_probs"] = log_probs
         if calculate_entropy:

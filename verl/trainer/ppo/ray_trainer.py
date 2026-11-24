@@ -1254,6 +1254,11 @@ class RayPPOTrainer:
         return ref_log_prob
 
     def _compute_old_log_prob(self, batch: DataProto):
+        debug_dir = self.config.trainer.get("token_probability_dir", None)
+        debug_every = int(self.config.trainer.get("token_probability_every", 1))
+        if debug_dir and debug_every < 1:
+            raise ValueError("trainer.token_probability_every must be positive")
+        debug_tokens = bool(debug_dir) and self.global_steps % debug_every == 0
         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
@@ -1267,6 +1272,18 @@ class RayPPOTrainer:
             calculate_sum_pi_squared=calculate_sum_pi_squared,
             compute_loss=False,
         )
+        if debug_tokens:
+            from verl.utils.token_probability_debug import watched_token_ids
+
+            if self.config.actor_rollout_ref.model.get("use_fused_kernels", False):
+                raise ValueError("Token diagnostics requires actor_rollout_ref.model.use_fused_kernels=False")
+            debug_topk = int(self.config.trainer.get("token_probability_topk", 10))
+            if debug_topk < 1:
+                raise ValueError("trainer.token_probability_topk must be positive")
+            watch_ids = watched_token_ids(self.tokenizer)
+            tu.assign_non_tensor(
+                batch_td, token_diag_topk=debug_topk, token_diag_watch_ids=tuple(watch_ids),
+            )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
         # gather output
         entropy = tu.get(output, "entropy")
@@ -1282,6 +1299,21 @@ class RayPPOTrainer:
             sum_pi_squared = no_padding_2_padding(sum_pi_squared, batch_td)
         # step 5: rebuild a tensordict and convert to dataproto
         result = {"old_log_probs": log_probs.float(), "entropys": entropy.float()}
+        if debug_tokens:
+            from verl.utils.token_probability_debug import DIAGNOSTIC_KEYS, write_step
+
+            diagnostics = {}
+            for key in DIAGNOSTIC_KEYS:
+                value = tu.get(output, key)
+                if value is None:
+                    raise RuntimeError(f"Actor backend did not return {key}; use the patched FSDP engine")
+                diagnostics[key] = no_padding_2_padding(value, batch_td)
+            write_step(
+                debug_dir, self.global_steps, batch, self.tokenizer, log_probs, entropy,
+                diagnostics, watch_ids, self.config.actor_rollout_ref.rollout.temperature,
+                "full_rollout_context" if self.config.get("distillation", {}).get("full_rollout_context", False)
+                else "baseline",
+            )
         if routed_experts is not None:
             result["routed_experts"] = routed_experts
         if sum_pi_squared is not None:
@@ -1531,6 +1563,8 @@ class RayPPOTrainer:
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+                        if self.config.trainer.get("token_probability_dir", None):
+                            raise ValueError("Token diagnostics requires rollout_correction.bypass_mode=False")
                         from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
                         apply_bypass_mode(
