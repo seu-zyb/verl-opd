@@ -1,0 +1,136 @@
+# OPD column of arXiv:2607.04751v1, Appendix B, NOT the TOP-D column.
+# Unspecified implementation choices are documented in docs/opd_paper_v1_zh.txt.
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  train_files:
+    - ${oc.env:PAPER_DATA_ROOT}/prepared/train.parquet
+  val_files:
+    - ${oc.env:PAPER_DATA_ROOT}/prepared/aime.parquet
+  train_batch_size: 512
+  val_batch_size: 8
+  max_prompt_length: 2048
+  max_response_length: 16384
+  shuffle: true
+  seed: ${oc.decode:${oc.env:SEED,2026}}
+  filter_overlong_prompts: true
+  truncation: error
+
+algorithm:
+  # Task-reward advantages are computed by the framework but excluded from OPD loss.
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  rollout_correction:
+    bypass_mode: false
+    rollout_is: null
+    rollout_rs: null
+
+actor_rollout_ref:
+  model:
+    path: ${oc.env:STUDENT_MODEL}
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+    use_fused_kernels: false
+    # Existing Qwen3-Base template; the paper does not publish its exact template.
+    custom_chat_template: |-
+      {%- for message in messages -%}
+      {{- "<|im_start|>" + message["role"] + "\n" + message["content"] + "<|im_end|>\n" -}}
+      {%- endfor -%}
+      {%- if add_generation_prompt -%}
+      {{- "<|im_start|>assistant\n" -}}
+      {%- endif -%}
+  actor:
+    # These are PROMPTS: ray_trainer multiplies 512 by rollout.n=8 -> 4096 responses.
+    ppo_mini_batch_size: 512
+    ppo_epochs: 1
+    use_dynamic_bsz: true
+    ppo_max_token_len_per_gpu: 18432
+    loss_agg_mode: token-mean
+    entropy_coeff: 0.0
+    use_kl_loss: false
+    use_torch_compile: false
+    data_loader_seed: ${data.seed}
+    optim:
+      optimizer: AdamW
+      lr: 1.0e-6
+      lr_warmup_steps: 0
+      lr_warmup_steps_ratio: 0.0
+      lr_scheduler_type: constant
+    fsdp_config:
+      seed: ${data.seed}
+      param_offload: true
+      optimizer_offload: true
+      use_torch_compile: false
+      entropy_from_logits_with_chunking: true
+  rollout:
+    name: vllm
+    agent:
+      default_agent_loop: single_turn_agent
+    n: 8
+    do_sample: true
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    ignore_eos: false
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.4
+    max_model_len: 18433
+    max_num_batched_tokens: 8192
+    max_num_seqs: 32
+    enable_chunked_prefill: true
+    log_prob_use_dynamic_bsz: true
+    log_prob_max_token_len_per_gpu: 18432
+    val_kwargs:
+      n: 32
+      do_sample: true
+      temperature: 1.0
+      top_p: 0.7
+      top_k: -1
+
+distillation:
+  enabled: true
+  full_rollout_context: false
+  n_gpus_per_node: 2
+  nnodes: 1
+  distillation_loss:
+    loss_mode: k1
+    use_policy_gradient: true
+    # Existing gpg computes -log_pi * stop_grad(log_teacher - log_pi).
+    # One update per fresh batch: no PPO clipping, no TOP-D interpolation/reuse.
+    policy_loss_mode: gpg
+    use_task_rewards: false
+    loss_max_clamp: null
+    log_prob_min_clamp: null
+  teacher_models:
+    teacher_model:
+      model_path: ${oc.env:TEACHER_MODEL}
+      inference:
+        name: vllm
+        tensor_model_parallel_size: 1
+        gpu_memory_utilization: 0.7
+        temperature: 1.0
+        max_model_len: 18433
+        max_num_batched_tokens: 8192
+        max_num_seqs: 8
+        enable_chunked_prefill: true
+
+trainer:
+  project_name: opd_paper_v1
+  experiment_name: qwen3_1.7b_base_from_14b_seed${data.seed}
+  logger: [console]
+  n_gpus_per_node: 2
+  nnodes: 1
+  balance_batch: true
+  # Paper says ~200-400 updates, without a unique budget for this model pair.
+  total_training_steps: ${oc.decode:${oc.env:TOTAL_TRAINING_STEPS,200}}
+  # Large enough outer-loop limit; total_training_steps ends the run first.
+  total_epochs: ${trainer.total_training_steps}
+  val_before_train: ${oc.decode:${oc.env:VAL_BEFORE_TRAIN,true}}
+  test_freq: ${oc.decode:${oc.env:TEST_FREQ,20}}
+  save_freq: ${oc.decode:${oc.env:SAVE_FREQ,20}}
+  resume_mode: disable
+  default_local_dir: ${oc.env:RUN_OUTPUT}
+  validation_data_dir: ${trainer.default_local_dir}/validation
+  rollout_data_dir: ${trainer.default_local_dir}/rollouts

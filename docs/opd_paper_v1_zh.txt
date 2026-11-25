@@ -1,0 +1,87 @@
+论文 OPD baseline：服务器运行说明
+
+依据：https://arxiv.org/html/2607.04751v1 （第 5.1 节、附录 B 表 5 的 OPD 列）
+本配置用于普通 OPD baseline。TOP-D 的插值、未来回报、组内归一化和轨迹复用没有启用。
+
+一、实验设置
+
+学生：Qwen3-1.7B-Base；教师：Qwen3-14B。
+训练：DAPO-Math-17k；验证：AIME 2024、2025、2026，每年 30 题。
+全局 batch：512 个 prompt，每个生成 8 个回答，共 4096 条 response。
+mini batch：512 个 prompt，ppo_epochs=1；每批新 rollout 只更新一次。
+注意：框架内部将 ppo_mini_batch_size 乘以 rollout.n，所以这里不要写成 4096。
+AdamW，学习率 1e-6，恒定学习率，无 warmup。
+prompt 上限 2048；训练和验证 response 上限均为 16384。
+训练 temperature=1、top_p=1；验证 temperature=1、top_p=0.7、n=32。
+学生和教师在同一 prompt + 当前学生前缀上计算 token 概率，full_rollout_context=false。
+教师打分温度为 1。教师在此负责计算学生 token 的 log probability，不是另采样 8 个教师回答。
+loss_mode=k1、use_policy_gradient=true、policy_loss_mode=gpg。
+gpg 是仓库已有的不带 PPO clipping 的 score-function 损失；本次仅放开配置校验。
+每个 token 的信号为 log p_teacher - log p_student，作为停止梯度的权重。
+任务正确性 reward 不参与优化，但仍计算并用于准确率监控。
+取消旧启动脚本对 log probability 和蒸馏信号的 +/-10 截断。
+
+二、不是论文明确指定的细节
+
+总步数默认 200：论文给出约 200–400 次更新，没有明确本模型对唯一的步数。
+trainer.total_epochs=total_training_steps 是足够大的外层循环上限，实际由总步数结束；不是跑 200 个 epoch。
+seed=2026，每 20 步验证和保存，启动前验证一次；这些是本实验的选择。
+采用现有 Qwen3-Base ChatML 模板、token-mean 聚合、weight_decay=0.01、grad_clip=1。
+保留 4 GPU 的服务器分配：2 张学生训练/rollout，2 张教师。论文使用更大的集群。
+microbatch token budget、并发数、offload、验证 batch=8 是显存适配参数。
+这些设置不等于完整复现作者运行环境，尚需在服务器上验证显存和运行时间。
+
+三、数据准备（已下载原始数据，不再联网）
+
+默认原始数据目录：/seu_nvme/home/fenglei/213241973/data/opd_paper_v1
+目录内应有：
+  dapo/data/dapo-math-17k.parquet
+  aime24/test-00000-of-00001.parquet
+  aime25/test.jsonl
+  aime26/aime2026.jsonl
+
+在仓库目录、verl-opd conda 环境中执行：
+  export PAPER_DATA_ROOT=/seu_nvme/home/fenglei/213241973/data/opd_paper_v1
+  python scripts/opd/prepare_paper_v1_data.py --data-root "$PAPER_DATA_ROOT"
+
+原始 DAPO 文件可能包含大量重复行；脚本流式读取，按完全相同的 prompt 去重。
+同一 prompt 的答案冲突会报错。保留原始 DAPO 提示词，不重新添加 GSM8K 的 #### 指令。
+下载的 math-ai AIME 数据转换为同样的 Answer: 提示格式，答案标准化为 0–999 整数。
+脚本检查每年 30 题、完全相同的训练/验证 prompt 重叠，并保存原始文件及输出文件的 SHA256。
+完全匹配检查不代表完成语义去污染。具体数据源、去重规则和提示模板是本实现的选择。
+输出 prepared/train.parquet、prepared/aime.parquet（90 题）、各年文件和 manifest.json。
+Parquet 使用显式 Arrow schema，不携带可能引发 datasets 版本冲突的 HF 元数据。
+重复运行只校验原始和生成文件；校验不一致报错，不覆盖已经登记的实验数据。
+
+四、提交任务
+
+  sbatch scripts/opd/run_paper_baseline.slurm
+
+新脚本读取 server_debug/full_rollout_paths.sh 中的模型和输出路径，数据使用 PAPER_DATA_ROOT。
+不再调用旧的 run_full_rollout_context.sh，也不需要手动修改旧 GSM8K Slurm 文件。
+输出目录：$OUTPUT_ROOT/paper-v1-opd/seed-2026-job-<jobid>
+保存 resolved-config.yaml、数据清单、git 版本、环境检查、training.log、validation、rollouts 和 checkpoint。
+查看 Slurm 状态：squeue -j <jobid>
+查看日志：tail -f opd-paper-<jobid>.out
+
+可先做 2 步启动验证（仍保留论文 batch 和长度，但不是正式实验）：
+  sbatch scripts/opd/run_paper_baseline.slurm trainer.total_training_steps=2 trainer.val_before_train=False trainer.test_freq=-1 trainer.save_freq=-1
+正式实验重新按默认命令提交，会从初始模型开始，不自动续跑。
+
+五、指标和 token 日志
+
+读取 val-core/aime24/acc/mean@32、aime25、aime26 对应指标。
+avg@32 是每题 32 次采样准确率再平均，不是 32 次中至少答对一次，也不是多数投票准确率。
+当前仓库 math_dapo 评分器从最后 300 字符中提取最后一个 Answer: 后的答案，报告 acc 和 score。
+score 是 +/-1，不要将其均值直接当作正确率；正确率看 acc。
+这不是以前 GSM8K 的 #### 规则。论文未明确公布完整评分实现，格式失败需另行统计。
+新数据集和随机 avg@32 评估不能与旧 GSM8K 贪心准确率直接比较。
+
+原来的逐 token 概率日志功能保留，但新大规模配置默认关闭。
+显式开启每一步、所有 response token 的日志：
+  sbatch --export=ALL,TOKEN_PROBABILITY_EVERY=1 scripts/opd/run_paper_baseline.slurm
+每 20 步记录一次：将 1 改成 20。0 表示关闭。
+每次记录学生 top-10、其余概率质量、EOS 概率、熵及教师对实际 token 的概率。
+这是稀疏分布摘要，不是教师或学生的全词表逐项转储。
+512*8*16384 最多约 6711 万个 response token/步；全量逐步记录会显著增加 CPU 内存、磁盘和时间开销。
+因此建议先在短实验检查日志，再决定正式实验的记录频率。

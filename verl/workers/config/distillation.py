@@ -51,7 +51,8 @@ class DistillationLossConfig(BaseConfig):
         Otherwise, distillation loss is directly backpropagated as a supervised loss,
         as in https://arxiv.org/abs/2306.13649. Recommended to use loss_mode=k3 or forward_kl_topk.
     policy_loss_mode (str):
-        Name of the policy loss to use when use_policy_gradient is true.
+        Policy loss when use_policy_gradient is true: vanilla (PPO) or gpg
+        (unclipped score-function gradient, for strictly on-policy updates).
     clip_ratio (float):
         PPO clipping ratio for policy loss.
     clip_ratio_low (float):
@@ -91,9 +92,9 @@ class DistillationLossConfig(BaseConfig):
 
         self.loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.loss_mode)
 
-        if self.policy_loss_mode != "vanilla":
+        if self.policy_loss_mode not in {"vanilla", "gpg"}:
             raise NotImplementedError(
-                f"Only vanilla policy loss is currently supported when use_policy_gradient is True, "
+                f"Only vanilla and gpg policy losses are supported when use_policy_gradient is True, "
                 f"but got {self.policy_loss_mode}."
             )
 
