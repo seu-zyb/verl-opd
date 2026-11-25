@@ -45,7 +45,15 @@ microbatch token budget、并发数、offload、验证 batch=8 是显存适配�
   python scripts/opd/prepare_paper_v1_data.py --data-root "$PAPER_DATA_ROOT"
 
 原始 DAPO 文件可能包含大量重复行；脚本流式读取，按完全相同的 prompt 去重。
-同一 prompt 的答案冲突会报错。保留原始 DAPO 提示词，不重新添加 GSM8K 的 #### 指令。
+整数答案的等价格式（如 007、+7、7.0）统一为 7；不推测分数或代数表达式是否等价。
+默认遇到真实答案冲突仍会报错，但扫描结束后会写出 prepared/dapo-conflicts.json，记录题目、答案频次和首个行号。
+若决定排除真实冲突题，执行：
+  python scripts/opd/prepare_paper_v1_data.py --data-root "$PAPER_DATA_ROOT" --dapo-conflict-policy drop
+drop 排除该题所有行，包括第一次出现和后续重复，不选择第一条答案，也不做多数投票。
+原始下载文件保持不变；manifest.json 记录唯一题目数、保留训练题数、重复行和冲突行的排除数量。
+这是本地数据清洗选择，会改变实际训练题集；论文对照时必须报告，不能声称与作者数据处理完全一致。
+已成功生成的 prepared 数据不允许换处理策略后直接覆盖。
+保留原始 DAPO 提示词，不重新添加 GSM8K 的 #### 指令。
 下载的 math-ai AIME 数据转换为同样的 Answer: 提示格式，答案标准化为 0–999 整数。
 脚本检查每年 30 题、完全相同的训练/验证 prompt 重叠，并保存原始文件及输出文件的 SHA256。
 完全匹配检查不代表完成语义去污染。具体数据源、去重规则和提示模板是本实现的选择。

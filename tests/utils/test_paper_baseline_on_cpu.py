@@ -30,10 +30,40 @@ def dapo_row(i, answer="7"):
 def test_exact_deduplication_and_conflicting_answers():
     rows, counts = prepare.convert_dapo([dapo_row(1), dapo_row(1), dapo_row(2)])
     assert len(rows) == 2
-    assert counts == {"raw_rows": 3, "unique_prompts": 2, "exact_duplicates_removed": 1}
+    assert counts["raw_rows"] == 3
+    assert counts["unique_prompts"] == counts["training_prompts"] == 2
+    assert counts["duplicate_rows_removed"] == 1
+    assert counts["conflicting_prompts"] == 0
     assert rows[0]["prompt"] == dapo_row(1)["prompt"]
     with pytest.raises(ValueError, match="conflicting answers"):
         prepare.convert_dapo([dapo_row(1), dapo_row(1, "8")])
+
+
+def test_integer_format_normalization_does_not_guess_other_expressions():
+    rows, counts = prepare.convert_dapo([dapo_row(1, a) for a in ["7", "007", "+7", "7.00"]])
+    assert len(rows) == 1
+    assert rows[0]["reward_model"]["ground_truth"] == "7"
+    assert counts["answer_format_rows_normalized"] == 3
+    assert prepare.normalize_dapo_answer("-003.0") == "-3"
+    for answer in ["0.5", "1/2", "1e3", "1,000", r"\boxed{7}"]:
+        assert prepare.normalize_dapo_answer(answer) == answer
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_drop_excludes_all_conflicting_rows_including_later_repeats(reverse):
+    raw = [dapo_row(1), dapo_row(1, "8"), dapo_row(2), dapo_row(1), dapo_row(2, "007")]
+    report = []
+    rows, counts = prepare.convert_dapo(reversed(raw) if reverse else raw, "drop", report)
+    assert [r["prompt"] for r in rows] == [dapo_row(2)["prompt"]]
+    assert rows[0]["extra_info"]["index"] == 0
+    assert counts["conflicting_prompts"] == 1
+    assert counts["conflict_rows_removed"] == 3
+    assert (
+        counts["raw_rows"]
+        == counts["training_prompts"] + counts["duplicate_rows_removed"] + counts["conflict_rows_removed"]
+    )
+    assert report[0]["answers"]["7"]["count"] == 2
+    assert report[0]["answers"]["8"]["count"] == 1
 
 
 def aime_rows(year):
@@ -57,7 +87,7 @@ def test_prepare_roundtrip_idempotency_and_tamper_detection(tmp_path):
     for directory in ("dapo/data", "aime24", "aime25", "aime26"):
         (tmp_path / directory).mkdir(parents=True)
     pq.write_table(
-        pa.Table.from_pylist([dapo_row(i) for i in range(512)] + [dapo_row(1)]),
+        pa.Table.from_pylist([dapo_row(i) for i in range(512)] + [dapo_row(1), dapo_row(999), dapo_row(999, "8")]),
         tmp_path / "dapo/data/dapo-math-17k.parquet",
     )
     pq.write_table(pa.Table.from_pylist(aime_rows(24)), tmp_path / "aime24/test-00000-of-00001.parquet")
@@ -65,16 +95,26 @@ def test_prepare_roundtrip_idempotency_and_tamper_detection(tmp_path):
         (tmp_path / f"aime{year}" / name).write_text(
             "\n".join(json.dumps(r) for r in aime_rows(year)), encoding="utf-8"
         )
-    manifest = prepare.prepare(tmp_path)
-    assert manifest["dapo"]["unique_prompts"] == 512
+    with pytest.raises(ValueError, match="conflicting answers"):
+        prepare.prepare(tmp_path)
+    report_path = tmp_path / "prepared/dapo-conflicts.json"
+    assert json.loads(report_path.read_text(encoding="utf-8"))["conflicting_prompts"] == 1
+    assert not (tmp_path / "prepared/manifest.json").exists()
+    assert not (tmp_path / "prepared/train.parquet").exists()
+    manifest = prepare.prepare(tmp_path, "drop")
+    assert manifest["dapo"]["unique_prompts"] == 513
+    assert manifest["dapo"]["training_prompts"] == 512
+    assert manifest["choices"]["dapo_conflict_policy"] == "drop"
     assert manifest["outputs"]["aime.parquet"]["rows"] == 90
     table = pq.read_table(tmp_path / "prepared/aime.parquet")
     assert not table.schema.metadata  # Avoid HF datasets metadata/version incompatibility.
     assert {r["data_source"] for r in table.to_pylist()} == {"aime24", "aime25", "aime26"}
-    assert prepare.prepare(tmp_path) == manifest
+    assert prepare.prepare(tmp_path, "drop") == manifest
+    with pytest.raises(ValueError, match="another conflict policy"):
+        prepare.prepare(tmp_path)
     (tmp_path / "prepared/train.parquet").write_bytes(b"changed")
     with pytest.raises(ValueError, match="Prepared file changed"):
-        prepare.prepare(tmp_path)
+        prepare.prepare(tmp_path, "drop")
 
 
 def test_hydra_profile_resolves_and_preserves_one_update_per_batch(monkeypatch):

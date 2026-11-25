@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -52,11 +53,21 @@ def make_row(prompt, answer, data_source, split, index, source_id):
     }
 
 
-def convert_dapo(rows):
-    """Collapse exact prompt repeats only; reject conflicting answers, keep first occurrence."""
+def normalize_dapo_answer(answer):
+    """Canonicalize plain integer notation only; do not guess algebraic equivalence."""
+    answer = str(answer).strip()
+    if re.fullmatch(r"[+-]?[0-9]+(?:\.0+)?", answer):
+        return str(int(answer.split(".")[0]))
+    return answer
+
+
+def convert_dapo(rows, conflict_policy="error", conflict_report=None):
+    """Audit all answers per exact prompt; optionally drop entire conflicting groups."""
+    if conflict_policy not in {"error", "drop"}:
+        raise ValueError(f"Unknown DAPO conflict policy: {conflict_policy}")
     seen = {}
-    converted = []
     total = 0
+    normalized_rows = 0
     for total, row in enumerate(rows, start=1):
         prompt = row.get("prompt")
         if not isinstance(prompt, list) or not prompt or prompt[-1].get("role") != "user":
@@ -69,21 +80,55 @@ def convert_dapo(rows):
         answer = row.get("reward_model", {}).get("ground_truth")
         if answer is None or not str(answer).strip():
             raise ValueError(f"DAPO row {total}: missing ground truth")
-        answer = str(answer).strip()
+        raw_answer = str(answer).strip()
+        answer = normalize_dapo_answer(raw_answer)
+        normalized_rows += answer != raw_answer
         key = prompt_key(prompt)
-        if key in seen:
-            if seen[key] != answer:
-                raise ValueError(f"DAPO row {total}: identical prompt has conflicting answers")
-            continue
-        seen[key] = answer
         source_id = (row.get("extra_info") or {}).get("index", total - 1)
-        converted.append(make_row(prompt, answer, "math_dapo", "train", len(converted), source_id))
-    if not converted:
+        group = seen.setdefault(key, {"prompt": prompt, "source_id": source_id, "answers": {}})
+        variant = group["answers"].setdefault(
+            answer, {"count": 0, "first_row": total, "source_id": str(source_id), "raw_answers": {}}
+        )
+        variant["count"] += 1
+        variant["raw_answers"][raw_answer] = variant["raw_answers"].get(raw_answer, 0) + 1
+    if not seen:
         raise ValueError("DAPO training set is empty")
+
+    converted = []
+    conflicts = []
+    duplicate_rows = 0
+    conflict_rows = 0
+    for key, group in seen.items():
+        if len(group["answers"]) > 1:
+            conflicts.append(
+                {
+                    "prompt_sha256": hashlib.sha256(key.encode("utf-8")).hexdigest(),
+                    "prompt": group["prompt"],
+                    "answers": group["answers"],
+                }
+            )
+            conflict_rows += sum(v["count"] for v in group["answers"].values())
+            continue
+        answer, variant = next(iter(group["answers"].items()))
+        duplicate_rows += variant["count"] - 1
+        converted.append(make_row(group["prompt"], answer, "math_dapo", "train", len(converted), group["source_id"]))
+    if conflict_report is not None:
+        conflict_report.extend(conflicts)
+    if conflicts and conflict_policy == "error":
+        first_answers = {a: v["first_row"] for a, v in conflicts[0]["answers"].items()}
+        raise ValueError(
+            f"DAPO: {len(conflicts)} identical prompts have conflicting answers after integer normalization; "
+            f"first conflict (answer: first row): {first_answers}. "
+            "See prepared/dapo-conflicts.json. Use --dapo-conflict-policy drop to exclude entire conflicting prompts."
+        )
     return converted, {
         "raw_rows": total,
-        "unique_prompts": len(converted),
-        "exact_duplicates_removed": total - len(converted),
+        "unique_prompts": len(seen),
+        "training_prompts": len(converted),
+        "duplicate_rows_removed": duplicate_rows,
+        "answer_format_rows_normalized": normalized_rows,
+        "conflicting_prompts": len(conflicts),
+        "conflict_rows_removed": conflict_rows,
     }
 
 
@@ -115,7 +160,7 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def prepare(root):
+def prepare(root, conflict_policy="error"):
     root = Path(root).resolve()
     output = root / "prepared"
     manifest_path = output / "manifest.json"
@@ -131,6 +176,8 @@ def prepare(root):
     # Do not overwrite a prepared experiment's datasets on an accidental rerun.
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest["choices"].get("dapo_conflict_policy", "error") != conflict_policy:
+            raise ValueError("Prepared data uses another conflict policy; use a new PAPER_DATA_ROOT")
         for name, path in inputs.items():
             if sha256(path) != manifest["inputs"][name]["sha256"]:
                 raise ValueError("Source data changed; use a new PAPER_DATA_ROOT")
@@ -141,7 +188,29 @@ def prepare(root):
         return manifest
     output.mkdir(parents=True, exist_ok=True)
     print("Reading DAPO in chunks and removing exact prompt duplicates...", flush=True)
-    train, counts = convert_dapo(iter_rows(inputs["dapo"]))
+    conflicts = []
+    conflict_path = output / "dapo-conflicts.json"
+    scan_complete = False
+    try:
+        train, counts = convert_dapo(iter_rows(inputs["dapo"]), conflict_policy, conflicts)
+        scan_complete = True
+    finally:
+        conflict_path.write_text(
+            json.dumps(
+                {
+                    "policy": conflict_policy,
+                    "scan_complete": scan_complete or bool(conflicts),
+                    "conflicting_prompts": len(conflicts),
+                    "conflicts": conflicts,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print("DAPO conflict report:", conflict_path, flush=True)
+    if conflicts:
+        print(f"Excluded {len(conflicts)} conflicting prompts; retained {len(train)} training prompts.", flush=True)
     if len(train) < 512:
         raise ValueError(f"Only {len(train)} unique training prompts; paper batch size is 512")
     evaluation = {name: convert_aime(iter_rows(inputs[name]), name[-2:]) for name in ("aime24", "aime25", "aime26")}
@@ -156,12 +225,13 @@ def prepare(root):
         "dapo": counts,
         "exact_prompt_overlap": overlap,
         "choices": {
-            "deduplication": "exact chat prompt; first occurrence",
+            "deduplication": "exact chat prompt; normalize plain integer answers; first occurrence if unambiguous",
+            "dapo_conflict_policy": conflict_policy,
             "evaluation_instruction": ANSWER_INSTRUCTION,
             "scoring": "verl math_dapo default: last Answer: in last 300 characters; use acc for avg@32",
         },
         "inputs": {name: {"path": str(path), "sha256": sha256(path)} for name, path in inputs.items()},
-        "outputs": {},
+        "outputs": {"dapo-conflicts.json": {"conflicting_prompts": len(conflicts), "sha256": sha256(conflict_path)}},
     }
     download_manifest = root / "download_manifest.json"
     if download_manifest.is_file():
@@ -188,4 +258,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data-root", default=os.environ.get("PAPER_DATA_ROOT"), required=not os.environ.get("PAPER_DATA_ROOT")
     )
-    prepare(parser.parse_args().data_root)
+    parser.add_argument(
+        "--dapo-conflict-policy",
+        choices=("error", "drop"),
+        default="error",
+        help="error writes a conflict report and stops; drop excludes every row of conflicting prompts",
+    )
+    args = parser.parse_args()
+    prepare(args.data_root, args.dapo_conflict_policy)
