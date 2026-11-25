@@ -132,6 +132,26 @@ def convert_dapo(rows, conflict_policy="error", conflict_report=None):
     }
 
 
+def extract_aime_answer(row, year, index):
+    """Read math-ai's answer column or aime24's answer-only boxed solution column."""
+    field = "answer"
+    raw = row.get(field)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        field = "solution"
+        raw = row.get(field)
+    answer = str(raw).strip()
+    boxed = re.fullmatch(r"\\boxed\{\s*([0-9]+)\s*\}", answer)
+    if boxed:
+        answer = boxed.group(1)
+    if not answer.isascii() or not answer.isdigit() or not 0 <= int(answer) <= 999:
+        raise ValueError(
+            f"AIME {year} row {index}: {field}={raw!r}; expected an integer in [0, 999] "
+            "or an answer-only boxed integer. "
+            f"Available fields: {sorted(row)}"
+        )
+    return str(int(answer))
+
+
 def convert_aime(rows, year):
     converted = []
     seen = set()
@@ -139,14 +159,12 @@ def convert_aime(rows, year):
         problem = row.get("problem")
         if not isinstance(problem, str) or not problem.strip():
             raise ValueError(f"AIME {year} row {i}: missing problem")
-        answer = str(row.get("answer", "")).strip()
-        if not answer.isascii() or not answer.isdigit() or not 0 <= int(answer) <= 999:
-            raise ValueError(f"AIME {year} row {i}: answer must be an integer in [0, 999]")
+        answer = extract_aime_answer(row, year, i)
         if problem.strip() in seen:
             raise ValueError(f"AIME {year}: duplicated question")
         seen.add(problem.strip())
         prompt = [{"role": "user", "content": ANSWER_INSTRUCTION + problem.strip()}]
-        converted.append(make_row(prompt, str(int(answer)), f"aime{year}", "test", i, row.get("id", i)))
+        converted.append(make_row(prompt, answer, f"aime{year}", "test", i, row.get("id", i)))
     if len(converted) != 30:
         raise ValueError(f"AIME {year}: expected 30 problems, found {len(converted)}")
     return converted
@@ -187,6 +205,9 @@ def prepare(root, conflict_policy="error"):
         print("Prepared files already verified:", manifest_path)
         return manifest
     output.mkdir(parents=True, exist_ok=True)
+    # Validate the small evaluation files before scanning the much larger DAPO file.
+    evaluation = {name: convert_aime(iter_rows(inputs[name]), name[-2:]) for name in ("aime24", "aime25", "aime26")}
+    print("Validated AIME 2024/2025/2026: 30 problems each.", flush=True)
     print("Reading DAPO in chunks and removing exact prompt duplicates...", flush=True)
     conflicts = []
     conflict_path = output / "dapo-conflicts.json"
@@ -213,7 +234,6 @@ def prepare(root, conflict_policy="error"):
         print(f"Excluded {len(conflicts)} conflicting prompts; retained {len(train)} training prompts.", flush=True)
     if len(train) < 512:
         raise ValueError(f"Only {len(train)} unique training prompts; paper batch size is 512")
-    evaluation = {name: convert_aime(iter_rows(inputs[name]), name[-2:]) for name in ("aime24", "aime25", "aime26")}
     train_keys = {prompt_key(r["prompt"]) for r in train}
     overlap = {name: sum(prompt_key(r["prompt"]) in train_keys for r in rows) for name, rows in evaluation.items()}
     if any(overlap.values()):
@@ -227,6 +247,7 @@ def prepare(root, conflict_policy="error"):
         "choices": {
             "deduplication": "exact chat prompt; normalize plain integer answers; first occurrence if unambiguous",
             "dapo_conflict_policy": conflict_policy,
+            "aime_answer_extraction": "answer if nonempty, else solution; plain integer or answer-only boxed integer",
             "evaluation_instruction": ANSWER_INSTRUCTION,
             "scoring": "verl math_dapo default: last Answer: in last 300 characters; use acc for avg@32",
         },

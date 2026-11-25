@@ -67,7 +67,14 @@ def test_drop_excludes_all_conflicting_rows_including_later_repeats(reverse):
 
 
 def aime_rows(year):
-    return [{"problem": f"AIME {year} question {i}", "answer": "007", "id": str(i)} for i in range(30)]
+    # math-ai/aime24 uses solution + integer id; aime25/26 use answer + string id.
+    return [
+        {
+            "problem": f"AIME {year} question {i}",
+            **({"solution": r"\boxed{007}", "id": i + 60} if year == 24 else {"answer": "007", "id": str(i)}),
+        }
+        for i in range(30)
+    ]
 
 
 def test_aime_contract():
@@ -81,6 +88,39 @@ def test_aime_contract():
     invalid[0]["answer"] = "1000"
     with pytest.raises(ValueError, match="integer"):
         prepare.convert_aime(invalid, "24")
+
+
+@pytest.mark.parametrize(
+    "year, raw, expected",
+    [
+        ("24", {"solution": r"\boxed{204}", "id": 60}, "204"),
+        ("25", {"answer": "70", "id": "0"}, "70"),
+        ("26", {"answer": "277", "id": "1"}, "277"),
+        ("24", {"answer": None, "solution": r"\boxed{000}"}, "0"),
+        ("24", {"answer": "", "solution": r"\boxed{999}"}, "999"),
+        ("25", {"answer": "007", "solution": "A long worked solution."}, "7"),
+    ],
+)
+def test_actual_math_ai_answer_schemas(year, raw, expected):
+    assert prepare.extract_aime_answer(raw, year, 0) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {},
+        {"answer": "1.5"},
+        {"answer": "1000"},
+        {"answer": "-1"},
+        {"solution": r"\boxed{1000}"},
+        {"solution": r"\boxed{1} or \boxed{2}"},
+        {"solution": "There are 204 objects."},
+        {"answer": "bad", "solution": r"\boxed{204}"},
+    ],
+)
+def test_aime_answer_parser_rejects_missing_ambiguous_or_invalid_labels(raw):
+    with pytest.raises(ValueError, match="Available fields"):
+        prepare.extract_aime_answer(raw, "24", 0)
 
 
 def test_prepare_roundtrip_idempotency_and_tamper_detection(tmp_path):

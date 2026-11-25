@@ -55,6 +55,9 @@ drop 排除该题所有行，包括第一次出现和后续重复，不选择第
 已成功生成的 prepared 数据不允许换处理策略后直接覆盖。
 保留原始 DAPO 提示词，不重新添加 GSM8K 的 #### 指令。
 下载的 math-ai AIME 数据转换为同样的 Answer: 提示格式，答案标准化为 0–999 整数。
+math-ai/aime24 的标准答案在 solution 字段（如 \boxed{204}）；aime25/26 在 answer 字段。
+转换脚本支持纯整数或仅含一个 boxed 整数的答案字段，不从解答正文随意抓取数字。
+三个 AIME 文件会优先校验，避免等待 DAPO 全表扫描后才发现验证集格式问题。
 脚本检查每年 30 题、完全相同的训练/验证 prompt 重叠，并保存原始文件及输出文件的 SHA256。
 完全匹配检查不代表完成语义去污染。具体数据源、去重规则和提示模板是本实现的选择。
 输出 prepared/train.parquet、prepared/aime.parquet（90 题）、各年文件和 manifest.json。
