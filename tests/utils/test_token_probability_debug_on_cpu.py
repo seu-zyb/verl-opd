@@ -60,7 +60,7 @@ def fixture_data():
     return batch, diagnostics
 
 
-def write(tmp_path, batch, diagnostics):
+def write(tmp_path, batch, diagnostics, context_mode="baseline"):
     return debug.write_step(
         tmp_path,
         1,
@@ -71,7 +71,7 @@ def write(tmp_path, batch, diagnostics):
         diagnostics,
         [4, 3],
         1.0,
-        "baseline",
+        context_mode,
     )
 
 
@@ -88,6 +88,25 @@ def test_teacher_shift_padding_and_eos_same_as_pad(tmp_path):
     assert row["tokens"][0]["logp_student_minus_teacher"] == -0.5
     assert row["tokens"][0]["student_other_mass"] == pytest.approx(0.6)
     assert debug.watched_token_ids(Tokenizer()) == [4, 3]
+
+
+def test_other_context_log_distinguishes_reference_from_scored_target(tmp_path):
+    batch, diagnostics = fixture_data()
+    batch.non_tensor_batch.update(
+        {
+            "teacher_context_response_ids": [[2, 3, 4]],
+            "mopd_target_id": ["question-a:0"],
+            "mopd_context_id": ["question-a:1"],
+        }
+    )
+    path = write(tmp_path, batch, diagnostics, "other_rollout_context")
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        row = json.loads(handle.readline())
+    assert row["teacher_context_mode"] == "other_rollout_context"
+    assert row["teacher_context_output"] == "2 3 4"
+    assert row["output"] == "1 4"
+    assert row["mopd_context_id"] != row["mopd_target_id"]
+    assert [token["teacher_logp"] for token in row["tokens"]] == [-0.5, -1.5]
 
 
 def test_misaligned_teacher_is_rejected_instead_of_probability_one(tmp_path):

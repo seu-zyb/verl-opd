@@ -7,7 +7,7 @@ baseline 为 opd_paper_v1；新配置 mopd_paper_v1 直接继承 baseline。
 1. 每题由当前学生按原设置独立采样 8 条回答 A0...A7。
 2. 收齐整个 batch 后，按训练 prompt 的 uid 分组；不同 worker 的分块不影响配对。
 3. 固定循环配对：A0 的教师上下文用 A1，A1 用 A2，...，A7 用 A0。
-4. 教师看到“题目 + 完整 B + 指导语”，在其后对原始 A 的 token 序列做 teacher forcing。
+4. 教师看到“题目 + 完整 B”，在其后对原始 A 的 token 序列做 teacher forcing。
 5. loss 仍为 token 级 k1 + unclipped policy gradient；实际优化的是 A 的学生 log probability。
 
 教师信号：log p_teacher(A_t | question, B, A_<t) - log p_student(A_t | question, A_<t)。
@@ -15,7 +15,9 @@ B 不直接拼给学生，也不把 B 的后缀当成 A 的预测目标。A 的 
 一条回答作为别人的 B 时，也仍作为自己的 A 参与该步训练。
 没有额外生成第 9 条回答，不按 score/verifier 挑选 B，不使用标准答案构造教师上下文。
 不同采样记录可能产生完全相同的文本；不会重采样强制文本不同，因为这会改变采样分布。
-现有“尽量保留合理推理与措辞、纠正错误”的教师指令保留，明确标注 B 是另一次独立作答。
+教师只额外接收 B 的引用文本，不追加“保留风格、措辞、纠正错误”等指导语。
+教师分布为 p_T(. | x, B, A_<t)，学生分布为 p_S(. | x, A_<t)。
+教师对给定 A 做逐 token 概率计算，不另外自由生成一条纠正后的回答。
 
 保持一致的实验条件
 DAPO 训练数据、AIME avg@32、模型、512 prompts/batch、8 rollouts/prompt、mini batch=512、
@@ -48,5 +50,6 @@ GPU 分配沿用学生 2 卡、教师 2 卡。h004 的 job-1871764 显示提前�
 每条 target_id 都必须不同于 context_id；每个 prompt 组内一一循环配对。
 same_token_content=true 表示两条独立采样结果恰好相同，不代表把 A 自己当作 B。
 启用 token_probs 后，日志另含 teacher_context_response_ids（B）、mopd_target_id、mopd_context_id。
+teacher_context_output 是 B 的可读文本；output 是实际训练目标 A 的可读文本。
 teacher_context_mode=other_rollout_context；teacher_p 对应带 B 条件的教师对 A 实际 token 的概率。
 不会将这种概率日志误标为普通 baseline 或 self hindsight。

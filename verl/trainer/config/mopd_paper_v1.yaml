@@ -8,11 +8,8 @@ distillation:
   full_rollout_context_source: other
   # Problem + complete B (up to 16384 tokens) + instruction/template overhead.
   full_rollout_context_max_prompt_length: 20480
-  full_rollout_context_instruction: >-
-    以上是学生对该问题的另一次独立作答，可能包含错误。
-    请独立判断其正确性。在给出正确解答的前提下，
-    尽量保留其中合理的推理思路、措辞和组织方式；
-    对于错误或不成立的内容，应予以纠正。
+  # Only supply the sampled companion as context; no style/correction instruction.
+  full_rollout_context_instruction: ""
   teacher_models:
     teacher_model:
       inference:

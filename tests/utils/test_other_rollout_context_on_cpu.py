@@ -272,6 +272,7 @@ def test_paper_configs_keep_student_data_loss_and_validation_identical(monkeypat
         assert baseline[key] == mopd[key]
     assert baseline.distillation.distillation_loss == mopd.distillation.distillation_loss
     assert context.uses_other_rollout(mopd) and not context.uses_other_rollout(baseline)
+    assert mopd.distillation.full_rollout_context_instruction == ""
     assert mopd.distillation.teacher_models.teacher_model.inference.max_model_len == (
         mopd.distillation.full_rollout_context_max_prompt_length + mopd.data.max_response_length + 1
     )

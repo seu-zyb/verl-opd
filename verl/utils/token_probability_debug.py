@@ -171,6 +171,9 @@ def write_step(
             if context is not None:
                 value = context[i]
                 row["teacher_context_response_ids"] = value.tolist() if hasattr(value, "tolist") else value
+                row["teacher_context_output"] = tokenizer.decode(
+                    row["teacher_context_response_ids"], skip_special_tokens=False
+                )
             for key in ("mopd_target_id", "mopd_context_id"):
                 if key in batch.non_tensor_batch:
                     row[key] = str(batch.non_tensor_batch[key][i])

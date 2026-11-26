@@ -1,5 +1,11 @@
 导入顺序绕过方案（h004，诊断 job-1871764）
 
+只修复已有 baseline：可单独上传 scripts/opd/run_paper_baseline_arrow_first.slurm。
+它内嵌启动 hook，固定使用原 opd_paper_v1 配置，不需要切换实验分支或复制其他新代码。
+该文件从 baseline 提交 6ff5ebb 的启动脚本生成，只添加导入顺序设置和更清晰的 Slurm 日志名称。
+提交两步验证：
+  sbatch run_paper_baseline_arrow_first.slurm trainer.total_training_steps=2 trainer.val_before_train=False trainer.test_freq=-1 trainer.save_freq=-1
+
 原顺序导入 vLLM 服务、原顺序加载 tokenizer 后导入服务，均 SIGSEGV（-11）。
 PyArrow 单独、pandas 单独、torch 后 PyArrow 均通过。
 先 PyArrow 再服务、先 torch/PyArrow 再服务、先 PyArrow 再 tokenizer/服务，均通过。
