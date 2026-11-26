@@ -96,3 +96,19 @@ score 是 +/-1，不要将其均值直接当作正确率；正确率看 acc。
 这是稀疏分布摘要，不是教师或学生的全词表逐项转储。
 512*8*16384 最多约 6711 万个 response token/步；全量逐步记录会显著增加 CPU 内存、磁盘和时间开销。
 因此建议先在短实验检查日志，再决定正式实验的记录频率。
+
+六、vLLM 导入段错误诊断
+
+若环境检查在导入 vllm_async_server 时 SIGSEGV，而 import-trace.log 末尾是
+pandas -> pyarrow._generated_version，可运行以下短诊断任务：
+  sbatch scripts/opd/diagnose_import_order.slurm
+需要在同一故障节点复查时，可使用：
+  sbatch --nodelist=h004 scripts/opd/diagnose_import_order.slurm
+该任务申请 1 GPU，仅运行导入和 tokenizer 检查，不加载模型权重或开始训练，不改依赖。
+8 个独立 Python 子进程对比 PyArrow/pandas 单独导入、torch+Arrow，以及原始/Arrow 优先的服务器导入。
+full 两项还复现原环境检查中的 tokenizer 加载步骤。
+若发生 SIGSEGV 且节点已有 gdb，会自动补采一份 native-backtrace.log；没有 gdb 不安装。
+诊断输出：$OUTPUT_ROOT/import-diagnostics/job-<jobid>，包含 summary.json 和每项日志。
+Slurm 作业完成只表示诊断收集结束；必须逐项查看 PASS/FAIL，不能据此认定训练环境已恢复。
+importtime 最后一项是最后完成的模块，不等于确认的故障根因。
+即使 Arrow 优先导入通过，也需要在实际 Ray worker 和训练启动流程验证后才能采用修复。
