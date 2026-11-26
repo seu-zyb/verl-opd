@@ -1311,8 +1311,11 @@ class RayPPOTrainer:
             write_step(
                 debug_dir, self.global_steps, batch, self.tokenizer, log_probs, entropy,
                 diagnostics, watch_ids, self.config.actor_rollout_ref.rollout.temperature,
-                "full_rollout_context" if self.config.get("distillation", {}).get("full_rollout_context", False)
-                else "baseline",
+                (
+                    "other_rollout_context"
+                    if self.config.get("distillation", {}).get("full_rollout_context_source", "self") == "other"
+                    else "full_rollout_context"
+                ) if self.config.get("distillation", {}).get("full_rollout_context", False) else "baseline",
             )
         if routed_experts is not None:
             result["routed_experts"] = routed_experts

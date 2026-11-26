@@ -1,0 +1,52 @@
+MOPD：用同题的另一条学生 rollout 构造教师上下文
+
+本分支的 MOPD 指本实验变体，不声称是某篇同名论文的完整复现。
+baseline 为 opd_paper_v1；新配置 mopd_paper_v1 直接继承 baseline。
+
+处理流程
+1. 每题由当前学生按原设置独立采样 8 条回答 A0...A7。
+2. 收齐整个 batch 后，按训练 prompt 的 uid 分组；不同 worker 的分块不影响配对。
+3. 固定循环配对：A0 的教师上下文用 A1，A1 用 A2，...，A7 用 A0。
+4. 教师看到“题目 + 完整 B + 指导语”，在其后对原始 A 的 token 序列做 teacher forcing。
+5. loss 仍为 token 级 k1 + unclipped policy gradient；实际优化的是 A 的学生 log probability。
+
+教师信号：log p_teacher(A_t | question, B, A_<t) - log p_student(A_t | question, A_<t)。
+B 不直接拼给学生，也不把 B 的后缀当成 A 的预测目标。A 的 token（含 EOS）不重编码。
+一条回答作为别人的 B 时，也仍作为自己的 A 参与该步训练。
+没有额外生成第 9 条回答，不按 score/verifier 挑选 B，不使用标准答案构造教师上下文。
+不同采样记录可能产生完全相同的文本；不会重采样强制文本不同，因为这会改变采样分布。
+现有“尽量保留合理推理与措辞、纠正错误”的教师指令保留，明确标注 B 是另一次独立作答。
+
+保持一致的实验条件
+DAPO 训练数据、AIME avg@32、模型、512 prompts/batch、8 rollouts/prompt、mini batch=512、
+ppo_epochs=1、AdamW lr=1e-6、训练/验证采样、学生 response=16384、默认 200 步和 seed 均继承 baseline。
+不启用 TOP-D 插值、PPO clipping 或任务奖励梯度。
+baseline 仍设置 full_rollout_context=false。旧 self 上下文模式继续可用；other 是显式的新模式。
+验证阶段不构造 B，不请求教师，仍只用学生独立解题。
+
+必须改变的资源设置
+教师前缀预算为 20480（题目 + 最长 16384 的 B + 模板/指令余量）；教师 max_model_len=36865。
+36865 = 20480 + 16384 + 1；额外 1 是原有 prompt_logprobs 请求的 dummy generation token。
+本地教师 config.json 的上下文容量必须支持该长度。公开 Qwen3-14B 配置为 40960：
+https://huggingface.co/Qwen/Qwen3-14B/raw/main/config.json
+超过前缀预算会明确报错，不静默截断 B。教师打分开销和 KV cache 压力会上升，运行时间不保证与 baseline 相同。
+GPU 分配沿用学生 2 卡、教师 2 卡。h004 的 job-1871764 显示提前导入 PyArrow 可绕过导入段错误。
+两个启动脚本现在默认启用作业内的 Arrow-first 设置；完整 Ray/GPU 训练仍需服务器验证。
+详见 docs/opd_arrow_startup_zh.txt。
+
+运行
+数据无需重新准备，复用同一 prepared 数据目录。
+  sbatch scripts/opd/run_paper_mopd.slurm
+先做 2 步启动验证：
+  sbatch scripts/opd/run_paper_mopd.slurm trainer.total_training_steps=2 trainer.val_before_train=False trainer.test_freq=-1 trainer.save_freq=-1
+逐 token 概率日志仍是显式开启：
+  sbatch --export=ALL,TOKEN_PROBABILITY_EVERY=1 scripts/opd/run_paper_mopd.slurm
+新输出目录为 $OUTPUT_ROOT/paper-v1-mopd/seed-2026-job-<jobid>。
+
+核对配对和日志
+每步 mopd_pairing/<step>.jsonl 记录 target_id、context_id、两个采样记录的位置、token 数及 SHA256。
+每条 target_id 都必须不同于 context_id；每个 prompt 组内一一循环配对。
+same_token_content=true 表示两条独立采样结果恰好相同，不代表把 A 自己当作 B。
+启用 token_probs 后，日志另含 teacher_context_response_ids（B）、mopd_target_id、mopd_context_id。
+teacher_context_mode=other_rollout_context；teacher_p 对应带 B 条件的教师对 A 实际 token 的概率。
+不会将这种概率日志误标为普通 baseline 或 self hindsight。

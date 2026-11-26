@@ -263,6 +263,8 @@ class DistillationConfig(BaseConfig):
 
     enabled: bool = False
     full_rollout_context: bool = False
+    # self: legacy hindsight; other: a distinct rollout record from the same prompt group.
+    full_rollout_context_source: str = "self"
     full_rollout_context_instruction: str = (
         "以上是学生对该问题的一次完整作答，可能包含错误。"
         "请独立判断其正确性。在给出正确解答的前提下，"
@@ -281,6 +283,10 @@ class DistillationConfig(BaseConfig):
         if not self.enabled:
             return
 
+        if self.full_rollout_context_source not in {"self", "other"}:
+            raise ValueError("full_rollout_context_source must be self or other.")
+        if self.full_rollout_context_source == "other" and not self.full_rollout_context:
+            raise ValueError("Other-rollout context requires full_rollout_context=True.")
         if self.full_rollout_context and self.full_rollout_context_max_prompt_length <= 0:
             raise ValueError("full_rollout_context_max_prompt_length must be positive.")
         self.teacher_models = self._resolve_teacher_models()

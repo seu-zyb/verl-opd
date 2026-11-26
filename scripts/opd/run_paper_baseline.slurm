@@ -23,12 +23,27 @@ export TRAIN_FILE="$PAPER_DATA_ROOT/prepared/train.parquet"
 export VAL_FILE="$PAPER_DATA_ROOT/prepared/aime.parquet"
 export SEED=${SEED:-2026}
 export TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-200}
-export RUN_OUTPUT="${OUTPUT_ROOT}/paper-v1-opd/seed-${SEED}-job-${SLURM_JOB_ID}"
+OPD_CONFIG_NAME=${OPD_CONFIG_NAME:-opd_paper_v1}
+OPD_RUN_LABEL=${OPD_RUN_LABEL:-paper-v1-opd}
+export RUN_OUTPUT="${OUTPUT_ROOT}/${OPD_RUN_LABEL}/seed-${SEED}-job-${SLURM_JOB_ID}"
 mkdir -p "$RUN_OUTPUT"
 cd "$PROJECT_ROOT"
 
 unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+# h004 job 1871764: original imports segfault; Arrow-first comparisons pass.
+# Job-scoped startup hook also reaches fresh Python subprocesses.
+export OPD_ARROW_FIRST=${OPD_ARROW_FIRST:-1}
+startup_overrides=()
+if [[ "$OPD_ARROW_FIRST" == 1 ]]; then
+    export PYTHONPATH="$PROJECT_ROOT/scripts/opd/arrow_first:$PYTHONPATH"
+    startup_overrides+=(
+        "+ray_kwargs.ray_init.runtime_env.env_vars.OPD_ARROW_FIRST=\"1\""
+        "+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH='$PYTHONPATH'"
+    )
+elif [[ "$OPD_ARROW_FIRST" != 0 ]]; then
+    echo 'OPD_ARROW_FIRST must be 0 or 1'; exit 1
+fi
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1 PYTHONFAULTHANDLER=1 PYTHONUNBUFFERED=1
 export NCCL_DEBUG=WARN HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
@@ -43,7 +58,7 @@ for path in "$STUDENT_MODEL" "$TEACHER_MODEL" "$TRAIN_FILE" "$VAL_FILE" "$PAPER_
     fi
 done
 
-echo "Job=$SLURM_JOB_ID; OPD: 512 prompts x 8 responses, one update/batch, response cap=16384"
+echo "Job=$SLURM_JOB_ID; Config=$OPD_CONFIG_NAME: 512 prompts x 8 responses, one update/batch, response cap=16384"
 echo "Student=$STUDENT_MODEL; Teacher=$TEACHER_MODEL; Output=$RUN_OUTPUT"
 hostname
 nvidia-smi
@@ -66,11 +81,11 @@ if (( ${TOKEN_PROBABILITY_EVERY:-0} > 0 )); then
 fi
 
 # Save fully resolved settings before spending GPU time; extra CLI args are applied last.
-python -m verl.trainer.main_ppo --config-name opd_paper_v1 --cfg job --resolve \
-    "${diagnostics[@]}" "$@" > "$RUN_OUTPUT/resolved-config.yaml"
+python -m verl.trainer.main_ppo --config-name "$OPD_CONFIG_NAME" --cfg job --resolve \
+    "${startup_overrides[@]}" "${diagnostics[@]}" "$@" > "$RUN_OUTPUT/resolved-config.yaml"
 python -u scripts/opd/check_environment.py --gpu --timeout 300 \
     --train-file "$TRAIN_FILE" --val-file "$VAL_FILE" --report-dir "$RUN_OUTPUT/checks" \
     2>&1 | tee "$RUN_OUTPUT/environment-check.log"
-python -u -m verl.trainer.main_ppo --config-name opd_paper_v1 \
-    "${diagnostics[@]}" "$@" 2>&1 | tee "$RUN_OUTPUT/training.log"
+python -u -m verl.trainer.main_ppo --config-name "$OPD_CONFIG_NAME" \
+    "${startup_overrides[@]}" "${diagnostics[@]}" "$@" 2>&1 | tee "$RUN_OUTPUT/training.log"
 echo "Completed: $RUN_OUTPUT"

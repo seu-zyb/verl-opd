@@ -125,6 +125,7 @@ class AsyncTeacherLLMServerManager:
         routing_key: Optional[str] = None,
         student_prompt_length: Optional[int] = None,
         raw_prompt: Optional[list[dict[str, Any]]] = None,
+        context_response_ids: Optional[list[int]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
@@ -141,9 +142,18 @@ class AsyncTeacherLLMServerManager:
             if raw_prompt is None:
                 raise ValueError("Full-rollout context requires the original raw_prompt messages.")
             response_ids = sequence_ids[student_prompt_length:]
+            context_source = getattr(self.distillation_config, "full_rollout_context_source", "self")
+            if context_source == "other":
+                if not context_response_ids:
+                    raise ValueError("Other-rollout context requires an explicit non-empty companion response.")
+                quoted_ids = context_response_ids
+            elif context_source == "self":
+                quoted_ids = response_ids
+            else:
+                raise ValueError(f"Unknown full_rollout_context_source: {context_source}")
             teacher_prompt = build_full_rollout_teacher_prompt(
                 raw_prompt=raw_prompt,
-                response_ids=response_ids,
+                response_ids=quoted_ids,
                 student_tokenizer=self.student_tokenizer,
                 teacher_tokenizer=self.teacher_tokenizers[teacher_key],
                 instruction=self.distillation_config.full_rollout_context_instruction,

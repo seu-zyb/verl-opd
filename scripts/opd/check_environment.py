@@ -95,6 +95,7 @@ def main():
         "LD_LIBRARY_PATH",
         "LD_PRELOAD",
         "PYTHONPATH",
+        "OPD_ARROW_FIRST",
     ):
         print(name, repr(os.environ.get(name)), flush=True)
 
@@ -114,6 +115,18 @@ def main():
         return status == "PASS"
 
     check("dependency metadata", command=[sys.executable, "-m", "pip", "check"])
+    if os.environ.get("OPD_ARROW_FIRST") == "1":
+        check(
+            "PyArrow startup preload",
+            """
+            import sys
+            assert "pyarrow" in sys.modules, "PyArrow was not preloaded at interpreter startup"
+            hook = sys.modules.get("sitecustomize")
+            assert getattr(hook, "OPD_ARROW_PRELOADED", False), "Wrong or missing OPD startup hook"
+            print("Startup hook:", hook.__file__)
+            print("PyArrow:", sys.modules["pyarrow"].__file__)
+            """,
+        )
     check(
         "model files and shard headers",
         """

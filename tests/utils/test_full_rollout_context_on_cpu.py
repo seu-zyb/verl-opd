@@ -195,6 +195,33 @@ def make_manager(module, enabled):
     return manager, client
 
 
+def test_other_rollout_manager_quotes_b_but_scores_original_a(manager_module):
+    manager, client = make_manager(manager_module, True)
+    manager.distillation_config.full_rollout_context_source = "other"
+    sequence = [1, 2, 3, 4, 21, 22, 23]
+    ids, probs = asyncio.run(
+        manager.compute_teacher_logprobs_single(
+            sequence_ids=sequence,
+            student_prompt_length=4,
+            raw_prompt=[{"role": "user", "content": "3 + 5?"}],
+            context_response_ids=[31, 32],
+        )
+    )
+    assert manager.student_tokenizer.decoded_ids == [31, 32]
+    assert client.request["prompt_ids"][-3:] == [21, 22, 23]
+    assert ids[3:6, 0].tolist() == [21, 22, 23]
+    assert probs[3:6, 0].tolist() == [-11.0, -12.0, -13.0]
+    assert sequence == [1, 2, 3, 4, 21, 22, 23]
+    with pytest.raises(ValueError, match="companion"):
+        asyncio.run(
+            manager.compute_teacher_logprobs_single(
+                sequence_ids=sequence,
+                student_prompt_length=4,
+                raw_prompt=[{"role": "user", "content": "Q"}],
+            )
+        )
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_manager_baseline_and_context_with_padding(manager_module, enabled):
     manager, client = make_manager(manager_module, enabled)

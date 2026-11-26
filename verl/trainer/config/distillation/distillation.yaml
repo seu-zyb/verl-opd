@@ -16,6 +16,9 @@ enabled: false
 # Teacher-only hindsight context. The student input and target rollout stay unchanged.
 full_rollout_context: false
 
+# self quotes the scored response; other quotes a distinct sample of the same question.
+full_rollout_context_source: self
+
 # Teacher instruction (empty string is also supported).
 full_rollout_context_instruction: >-
   以上是学生对该问题的一次完整作答，可能包含错误。

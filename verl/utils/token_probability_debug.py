@@ -171,6 +171,9 @@ def write_step(
             if context is not None:
                 value = context[i]
                 row["teacher_context_response_ids"] = value.tolist() if hasattr(value, "tolist") else value
+            for key in ("mopd_target_id", "mopd_context_id"):
+                if key in batch.non_tensor_batch:
+                    row[key] = str(batch.non_tensor_batch[key][i])
             handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
     temporary.replace(target)
     return target

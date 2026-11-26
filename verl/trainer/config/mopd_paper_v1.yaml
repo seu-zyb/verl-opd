@@ -1,0 +1,25 @@
+# Same optimization/data/evaluation budget as the OPD control.
+defaults:
+  - opd_paper_v1
+  - _self_
+
+distillation:
+  full_rollout_context: true
+  full_rollout_context_source: other
+  # Problem + complete B (up to 16384 tokens) + instruction/template overhead.
+  full_rollout_context_max_prompt_length: 20480
+  full_rollout_context_instruction: >-
+    以上是学生对该问题的另一次独立作答，可能包含错误。
+    请独立判断其正确性。在给出正确解答的前提下，
+    尽量保留其中合理的推理思路、措辞和组织方式；
+    对于错误或不成立的内容，应予以纠正。
+  teacher_models:
+    teacher_model:
+      inference:
+        # Prefix budget + unchanged A response cap + one dummy generation token.
+        max_model_len: 36865
+
+trainer:
+  project_name: mopd_paper_v1
+  experiment_name: qwen3_1.7b_base_from_14b_other_rollout_seed${data.seed}
+  mopd_pairing_dir: ${trainer.default_local_dir}/mopd_pairing

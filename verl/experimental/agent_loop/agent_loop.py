@@ -53,6 +53,7 @@ from verl.utils.chat_template import apply_chat_template, initialize_system_prom
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.other_rollout_context import attach_other_rollout_context, uses_other_rollout, write_pairing_report
 from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
@@ -916,6 +917,9 @@ class AgentLoopWorker:
                     raise ValueError(
                         "Full-rollout context only supports single-turn responses without tool observations."
                     )
+            if uses_other_rollout(self.config):
+                # All companions must finish before pairing across worker chunks.
+                return
             routing_key = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)
@@ -932,6 +936,54 @@ class AgentLoopWorker:
             )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
+
+    async def compute_other_rollout_teacher(self, batch: DataProto) -> DataProto:
+        """Second pass: score original A tokens with an explicitly paired B prefix."""
+        if not uses_other_rollout(self.config) or batch.meta_info.get("validate", False):
+            raise ValueError("Deferred teacher scoring is only valid for MOPD training.")
+        from verl.experimental.teacher_loop.teacher_manager import _pad_teacher_outputs
+
+        prompt_width = batch.batch["prompts"].shape[1]
+        response_width = batch.batch["responses"].shape[1]
+
+        async def score(i):
+            attention = batch.batch["attention_mask"][i].bool()
+            prompt_ids = batch.batch["prompts"][i][attention[:prompt_width]].tolist()
+            response_ids = batch.batch["responses"][i][attention[prompt_width:]].tolist()
+            non_tensor = batch.non_tensor_batch
+            if non_tensor["mopd_target_id"][i] == non_tensor["mopd_context_id"][i]:
+                raise ValueError("MOPD companion must be another rollout record.")
+            routing = non_tensor.get(self.teacher_key)
+            routing_key = routing[i] if routing is not None else None
+            if hasattr(routing_key, "item"):
+                routing_key = routing_key.item()
+            teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
+                sequence_ids=prompt_ids + response_ids,
+                student_prompt_length=len(prompt_ids),
+                raw_prompt=non_tensor["raw_prompt"][i],
+                context_response_ids=non_tensor["teacher_context_response_ids"][i].tolist(),
+                routing_key=routing_key,
+            )
+            return _pad_teacher_outputs(
+                teacher_ids,
+                teacher_logprobs,
+                prompt_width,
+                response_width,
+                len(prompt_ids),
+                len(response_ids),
+                self.tokenizer.pad_token_id,
+            )
+
+        results = await asyncio.gather(*(score(i) for i in range(len(batch))))
+        return DataProto(
+            batch=TensorDict(
+                {
+                    "teacher_ids": torch.cat([result[0] for result in results], dim=0),
+                    "teacher_logprobs": torch.cat([result[1] for result in results], dim=0),
+                },
+                batch_size=len(batch),
+            )
+        )
 
     def _postprocess(
         self,
@@ -1073,6 +1125,14 @@ class AgentLoopManager:
         self.teacher_client = teacher_client
         self.reward_loop_worker_handles = reward_loop_worker_handles
 
+        if uses_other_rollout(config):
+            if self.rollout_config.n < 2 or self.rollout_config.temperature <= 0:
+                raise ValueError("MOPD requires n >= 2 and stochastic sampling (temperature > 0).")
+            if self.rollout_config.agent.default_agent_loop != "single_turn_agent":
+                raise ValueError("MOPD requires the text-only single_turn_agent.")
+            if teacher_client is None:
+                raise ValueError("MOPD requires teacher clients.")
+
         if not hasattr(self, "agent_loop_workers_class"):
             self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
@@ -1124,6 +1184,26 @@ class AgentLoopManager:
             ]
         )
         output = DataProto.concat(outputs)
+
+        if uses_other_rollout(self.config) and not prompts.meta_info.get("validate", False):
+            if "__do_sample__" in prompts.non_tensor_batch:
+                raise ValueError("MOPD does not support mixed greedy/stochastic REMAX batches.")
+            audit = attach_other_rollout_context(output, prompts.non_tensor_batch.get("uid"), self.rollout_config.n)
+            # Routing metadata may be consumed by the streaming reward loop.
+            teacher_key = self.config.distillation.teacher_key
+            if teacher_key in prompts.non_tensor_batch:
+                output.non_tensor_batch[teacher_key] = prompts.non_tensor_batch[teacher_key]
+            directory = self.config.trainer.get("mopd_pairing_dir")
+            if directory:
+                write_pairing_report(directory, prompts.meta_info.get("global_steps", -1), audit)
+            teacher_chunks = output.chunk(len(self.agent_loop_workers))
+            teacher_outputs = await asyncio.gather(
+                *[
+                    worker.compute_other_rollout_teacher.remote(chunk)
+                    for worker, chunk in zip(self.agent_loop_workers, teacher_chunks, strict=True)
+                ]
+            )
+            output = output.union(DataProto.concat(teacher_outputs))
 
         # calculate performance metrics
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
