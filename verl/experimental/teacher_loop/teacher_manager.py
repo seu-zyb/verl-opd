@@ -119,21 +119,24 @@ class AsyncTeacherLLMServerManager:
 
     async def compute_teacher_logprobs_single(
         self,
-        sequence_ids: list[int],
+        sequence_ids: list[int],        '''student的prompt和response token序列'''
         multi_modal_data: Optional[dict[str, Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         routing_key: Optional[str] = None,
-        student_prompt_length: Optional[int] = None,
+        student_prompt_length: Optional[int] = None,    '''student的prompt的数量'''
         raw_prompt: Optional[list[dict[str, Any]]] = None,
-        context_response_ids: Optional[list[int]] = None,
+        context_response_ids: Optional[list[int]] = None,        '''作为上下文的rollout的token序列'''
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute teacher log probabilities for a single unpadded sequence."""
+        '''选择teacher模型并初始化'''
         multi_modal_data = multi_modal_data or {}
-        teacher_key = self._resolve_teacher_key(routing_key)
+        teacher_key = self._resolve_teacher_key(routing_key)    '''选择路由'''
         teacher_model_config = self.teacher_model_configs[teacher_key]
         client = self.teacher_client[teacher_key]
         original_sequence_length = len(sequence_ids)
         teacher_prompt_length = None
+
+        '''检查是否是full contesxt模式 '''
         if self.distillation_config.full_rollout_context:
             if multi_modal_data or mm_processor_kwargs:
                 raise ValueError("Full-rollout context currently supports text-only, single-turn distillation.")
@@ -141,12 +144,14 @@ class AsyncTeacherLLMServerManager:
                 raise ValueError("Full-rollout context requires a non-empty student prompt and response.")
             if raw_prompt is None:
                 raise ValueError("Full-rollout context requires the original raw_prompt messages.")
-            response_ids = sequence_ids[student_prompt_length:]
+            response_ids = sequence_ids[student_prompt_length:]    '''从prompt后面提取response'''
             context_source = getattr(self.distillation_config, "full_rollout_context_source", "self")
+            ''''rollout context模式'''
             if context_source == "other":
                 if not context_response_ids:
                     raise ValueError("Other-rollout context requires an explicit non-empty companion response.")
                 quoted_ids = context_response_ids
+                '''两种不同的构造上下文的方式'''
             elif context_source == "self":
                 quoted_ids = response_ids
             else:
@@ -155,8 +160,8 @@ class AsyncTeacherLLMServerManager:
                 raw_prompt=raw_prompt,
                 response_ids=quoted_ids,
                 student_tokenizer=self.student_tokenizer,
-                teacher_tokenizer=self.teacher_tokenizers[teacher_key],
-                instruction=self.distillation_config.full_rollout_context_instruction,
+                teacher_tokenizer=self.teacher_tokenizers[teacher_key],             
+                instruction=self.distillation_config.full_rollout_context_instruction  '''如何构造rollout和prompt的上下文？''',
                 max_prompt_length=self.distillation_config.full_rollout_context_max_prompt_length,
                 chat_template_kwargs=self.distillation_config.full_rollout_context_chat_template_kwargs,
             )
@@ -167,8 +172,10 @@ class AsyncTeacherLLMServerManager:
                 raise ValueError(
                     f"Teacher request requires {len(sequence_ids) + 1} tokens, exceeding {max_model_len=}."
                 )
+                
         teacher_output = await client.generate(
-            request_id=uuid4().hex,
+            
+            request_id=uuid4().hex    '''每一个推理分配唯一的标识''',
             prompt_ids=sequence_ids,
             sampling_params=_get_teacher_sampling_params(teacher_model_config, self.distillation_loss_config),
             image_data=multi_modal_data.get("images"),
