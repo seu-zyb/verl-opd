@@ -20,6 +20,9 @@ full_rollout_context: false
 full_rollout_context_source: self
 
 # Teacher instruction (empty string is also supported).
+
+'''以下回复的参考。。。'''
+
 full_rollout_context_instruction: >-
   以上是学生对该问题的一次完整作答，可能包含错误。
   请独立判断其正确性。在给出正确解答的前提下，
