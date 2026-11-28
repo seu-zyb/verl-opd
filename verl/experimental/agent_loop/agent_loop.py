@@ -390,7 +390,7 @@ def register(agent_name: str):
 
     return decorator
 
-# 用于生成不同 prompt 对应的多个 rollout。
+'''用于生成不同prompt对应的多个rollout的'''
 class AgentLoopWorker:
     """Agent loop worker takes a batch of messages and run each message in an agent loop.
 
@@ -912,15 +912,15 @@ class AgentLoopWorker:
     ) -> None:
         """Compute teacher logprobs for single sample."""
         if self.distillation_enabled and not validate:
-            # 必须开启 full_rollout_context 模式才检查以下条件。
+          '''必须开启full_rollout_context模式才可以'''
             if self.teacher_server_manager.distillation_config.full_rollout_context:
-                # 必须是单轮，且 response_mask 只包含模型生成的 token。
+              '''必须是单轮的且response必须是有效的，mask掩盖掉环境观察（不是模型自己生成的token）'''
                 if output.num_turns != 2 or not all(output.response_mask):
                     raise ValueError(
                         "Full-rollout context only supports single-turn responses without tool observations."
                     )
             if uses_other_rollout(self.config):
-                # 等所有 rollout 配对后再蒸馏，避免其他 worker 尚未生成完毕。
+              '''等配对好之后再启动蒸馏 否则多worker会导致其他的rollout还没有生成就开始计算分数'''
                 # All companions must finish before pairing across worker chunks.
                 return
             routing_key = None
