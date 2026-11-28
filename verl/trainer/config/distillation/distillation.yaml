@@ -21,7 +21,7 @@ full_rollout_context_source: self
 
 # Teacher instruction (empty string is also supported).
 
-'''以下回复的参考。。。'''
+# 以下内容是教师端可选的作答参考。
 
 full_rollout_context_instruction: >-
   以上是学生对该问题的一次完整作答，可能包含错误。
