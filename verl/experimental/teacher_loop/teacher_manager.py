@@ -159,6 +159,7 @@ class AsyncTeacherLLMServerManager:
                 instruction=self.distillation_config.full_rollout_context_instruction,
                 max_prompt_length=self.distillation_config.full_rollout_context_max_prompt_length,
                 chat_template_kwargs=self.distillation_config.full_rollout_context_chat_template_kwargs,
+                context_source=context_source,
             )
             teacher_prompt_length = len(teacher_prompt)
             sequence_ids = teacher_prompt + response_ids
