@@ -8,8 +8,11 @@ distillation:
   full_rollout_context_source: other
   # Problem + complete B (up to 16384 tokens) + instruction/template overhead.
   full_rollout_context_max_prompt_length: 20480
-  # Only supply the sampled companion as context; no style/correction instruction.
-  full_rollout_context_instruction: ""
+  # The companion is unverified; ask the teacher to solve independently.
+  full_rollout_context_instruction: >-
+    The solution above is another student's attempt at the same problem and has not been verified.
+    It may be correct or incorrect. Consider it while solving the original problem independently.
+    Follow the answer format required by the original problem.
   teacher_models:
     teacher_model:
       inference:
