@@ -42,7 +42,6 @@ def build_full_rollout_teacher_prompt(
     instruction: str,
     max_prompt_length: int,
     chat_template_kwargs: Mapping[str, Any] | None = None,
-    context_source: str = "self",
 ) -> list[int]:
     """Build one teacher user message; return IDs ending at the assistant start.
 
@@ -75,12 +74,7 @@ def build_full_rollout_teacher_prompt(
     # actual response IDs used for teacher forcing (including EOS).
     attempt = student_tokenizer.decode(response_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
     problem = "\n\n".join(problem_parts)
-    if context_source == "other":
-        content = f"Problem:\n{problem}\n\nAnother solution:\n{attempt}"
-    elif context_source == "self":
-        content = f"Problem:\n{problem}\n\n=== Student Attempt Begin ===\n{attempt}\n=== Student Attempt End ==="
-    else:
-        raise ValueError(f"Unknown full_rollout_context_source: {context_source}")
+    content = f"Problem:\n{problem}\n\n=== Student Attempt Begin ===\n{attempt}\n=== Student Attempt End ==="
     if instruction.strip():
         content += f"\n\n{instruction.strip()}"
     tokenized = teacher_tokenizer.apply_chat_template(

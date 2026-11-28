@@ -98,17 +98,6 @@ def test_empty_instruction_is_supported():
     assert teacher.messages[0]["content"].endswith("=== Student Attempt End ===")
 
 
-def test_other_rollout_is_labelled_before_attempt_and_instructed_after():
-    teacher = Tokenizer()
-    instruction = "This is an unverified attempt. Solve the original problem independently."
-    build(context_source="other", instruction=instruction, teacher_tokenizer=teacher)
-    assert teacher.messages[0]["content"] == (
-        "Problem:\nWhat is 3 + 5?\n\n"
-        "Another solution:\n3 + 5 = 9\n\n"
-        + instruction
-    )
-
-
 def test_context_budget_never_silently_truncates():
     with pytest.raises(ValueError, match="never silently truncated"):
         build(max_prompt_length=11)
